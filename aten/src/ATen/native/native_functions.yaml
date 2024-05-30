@@ -1237,8 +1237,17 @@
   # Like clone, but the copy takes place lazily, only if either the
   # input or the output are written.
   variants: function, method
-  dispatch:
-    CompositeExplicitAutograd: _lazy_clone
+
+- func: _simulate_lazy_clone(Tensor(a) self) -> Tensor(a)
+  # Returns a view of the input, but if any writes/reads occur later on which
+  # would cause user-observable behavior that diverges from that of
+  # `_lazy_clone`, then a warning is raised.
+  variants: function, method
+
+- func: _apply_cow_(Tensor(a!) self) -> Tensor(a!)
+  # Creates a new COW storage from the input's storage and sets the input's
+  # storage to the new one.
+  variants: method
 
 - func: logical_not(Tensor self) -> Tensor
   device_check: NoCheck   # TensorIterator

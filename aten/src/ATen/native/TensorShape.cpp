@@ -8,6 +8,7 @@
 #include <ATen/Dispatch.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/InferSize.h>
+#include <ATen/LegacyBatchedTensorImpl.h>
 #include <ATen/MemoryOverlap.h>
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/SparseCsrTensorUtils.h>
@@ -31,11 +32,13 @@
 #include <c10/util/SmallVector.h>
 #include <c10/util/accumulate.h>
 #include <c10/util/irange.h>
+#include <c10/core/impl/COW.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
 #else
+#include <ATen/ops/_apply_cow.h>
 #include <ATen/ops/_chunk_cat_native.h>
 #include <ATen/ops/_conj_copy_native.h>
 #include <ATen/ops/_convert_indices_from_coo_to_csr.h>
@@ -43,6 +46,7 @@
 #include <ATen/ops/_foreach_copy.h>
 #include <ATen/ops/_fw_primal_copy_native.h>
 #include <ATen/ops/_indices_copy_native.h>
+#include <ATen/ops/_lazy_clone_native.h>
 #include <ATen/ops/_make_dual.h>
 #include <ATen/ops/_make_dual_copy_native.h>
 #include <ATen/ops/_mkldnn_reshape.h>
@@ -53,6 +57,7 @@
 #include <ATen/ops/_reshape_copy_native.h>
 #include <ATen/ops/_reshape_from_tensor_native.h>
 #include <ATen/ops/_shape_as_tensor_native.h>
+#include <ATen/ops/_simulate_lazy_clone_native.h>
 #include <ATen/ops/_sparse_broadcast_to.h>
 #include <ATen/ops/_sparse_broadcast_to_copy_native.h>
 #include <ATen/ops/_sparse_broadcast_to_native.h>
@@ -1635,12 +1640,13 @@ Tensor reshape_symint(const Tensor& self, c10::SymIntArrayRef proposed_shape) {
   }
 
   if (self.is_contiguous() && !self.is_mkldnn()) {
-    return self.view_symint(proposed_shape);
+    return self.view_symint(proposed_shape)._apply_cow_();
   }
 
   c10::SymDimVector shape = infer_size_dv(proposed_shape, self.sym_numel());
 
   if (self.is_mkldnn()) {
+    // TODO: Will need to do this one
     return at::_mkldnn_reshape(self, C10_AS_INTARRAYREF_SLOW(shape));
   }
 
@@ -1665,9 +1671,9 @@ Tensor reshape_symint(const Tensor& self, c10::SymIntArrayRef proposed_shape) {
     // We need to do the checks here instead of in `native_functions.yaml`
     // to preserve backwards compatibility.
     if (!self.is_xla() && !self.is_lazy() && !self.is_ipu() && !at::isTensorSubclassLike(self)) {
-      return self._reshape_alias_symint(shape, stride.value());
+      return self._reshape_alias_symint(shape, stride.value())._apply_cow_();
     } else {
-      return self.view_symint(shape);
+      return self.view_symint(shape)._apply_cow_();
     }
   }
   return at::_unsafe_view_symint(self.clone(at::MemoryFormat::Contiguous), shape);
@@ -1699,6 +1705,7 @@ Tensor reshape(const Tensor& self, IntArrayRef proposed_shape) {
   DimVector shape = infer_size_dv(proposed_shape, self.numel());
 
   if (self.is_mkldnn()) {
+    // TODO: Instrument this
     return at::_mkldnn_reshape(self, shape);
   }
 
@@ -1723,9 +1730,9 @@ Tensor reshape(const Tensor& self, IntArrayRef proposed_shape) {
     // We need to do the checks here instead of in `native_functions.yaml`
     // to preserve backwards compatibility.
     if (!self.is_xla() && !self.is_lazy() && !self.is_ipu()) {
-      return self._reshape_alias(shape, stride.value());
+      return self._reshape_alias(shape, stride.value())._apply_cow_();
     } else {
-      return self.view(shape);
+      return self.view(shape)._apply_cow_();
     }
   }
   return at::_unsafe_view(self.clone(at::MemoryFormat::Contiguous), shape);
@@ -4102,6 +4109,44 @@ int64_t sparse_dim_default(const Tensor& self) {
 int64_t dense_dim_default(const Tensor& self) {
   TORCH_CHECK(self.layout() == kStrided, "dense_dim expected sparse or strided tensor layout but got ", self.layout());
   return self.dim();
+}
+
+static Tensor _lazy_clone_impl(Tensor const& self) {
+  c10::StorageImpl* self_storage = self.storage().unsafeGetStorageImpl();
+  c10::intrusive_ptr<c10::StorageImpl> storage;
+  storage = c10::impl::cow::lazy_clone_storage(*self_storage);
+  TORCH_CHECK(storage != nullptr);
+  Tensor self_;
+
+  if (c10::impl::cow::get_future_lazy_clone()) {
+    self_ = at::detail::make_tensor<TensorImpl>(
+      c10::Storage(std::move(storage)),
+      self.key_set(),
+      self.dtype());
+
+    self_.unsafeGetTensorImpl()->set_sizes_and_strides(
+      self.sym_sizes(),
+      self.sym_strides(),
+      self.sym_storage_offset());
+  } else {
+    self_ = self.view_symint(self.sym_sizes());
+    self_.unsafeGetTensorImpl()->set_storage_keep_dtype(storage);
+  }
+  return self_;
+}
+
+Tensor _lazy_clone(Tensor const& self) {
+  TORCH_CHECK(
+      c10::impl::cow::get_future_lazy_clone(),
+      "Cannot lazy clone when future lazy clone behavior is disabled");
+  return _lazy_clone_impl(self);
+}
+
+Tensor _simulate_lazy_clone(Tensor const& self) {
+  TORCH_CHECK(
+      !c10::impl::cow::get_future_lazy_clone(),
+      "Cannot simulate lazy clone when future lazy clone behavior is enabled");
+  return _lazy_clone_impl(self);
 }
 
 } // namespace at::native

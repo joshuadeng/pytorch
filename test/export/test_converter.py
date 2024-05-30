@@ -18,8 +18,11 @@ class TestConverter(TestCase):
         orig_out, _ = pytree.tree_flatten(mod(*inp))
         self.assertEqual(len(ep_out), len(orig_out))
         for ep_t, orig_t in zip(ep_out, orig_out):
-            self.assertEqual(ep_t.shape, orig_t.shape)
-            self.assertTrue(torch.allclose(ep_t, orig_t))
+            if isinstance(ep_t, torch.Tensor):
+                self.assertEqual(ep_t.shape, orig_t.shape)
+                self.assertTrue(torch.allclose(ep_t, orig_t))
+            else:
+                self.assertEqual(ep_t, orig_t)
 
     def test_ts2ep_converter_basic(self):
         class MSingle(torch.nn.Module):
@@ -63,6 +66,19 @@ class TestConverter(TestCase):
         self._check_equal_ts_ep_converter(MOutputList(), inp)
         self._check_equal_ts_ep_converter(MOutputTuple(), inp)
         self._check_equal_ts_ep_converter(MOutputDict(), inp)
+
+    def test_ts2ep_converter_contains(self):
+        class MIn(torch.nn.Module):
+            def forward(self, x: torch.Tensor):
+                return x.dtype in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+        class MNotIn(torch.nn.Module):
+            def forward(self, x: torch.Tensor):
+                return x.dtype in [-1]
+
+        inp = (torch.tensor(4),)
+        self._check_equal_ts_ep_converter(MIn(), inp)
+        self._check_equal_ts_ep_converter(MNotIn(), inp)
 
 
 if __name__ == "__main__":

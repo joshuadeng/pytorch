@@ -44,7 +44,8 @@ def get_op_overload(node: torch._C.Node):
     ns, op_name = str(schema.name.name).split("::")
     override = schema.name.overload_name
 
-    op_overload_packet = getattr(torch.ops.aten, op_name)
+    op_overload_mod = getattr(torch.ops, ns)
+    op_overload_packet = getattr(op_overload_mod, op_name)
     if override:
         op_overload = getattr(op_overload_packet, override)
     else:
@@ -337,6 +338,19 @@ class TS2EPConverter:
 
         self.convert_aten_op(node)
 
+    def convert_custom_op(self, node: torch._C.Node):
+        target = get_op_overload(node)
+
+        args, kwargs = self.get_args_kwargs(node, target._schema)
+        print(target, args, kwargs)
+        print(target._schema)
+
+        fx_node = self.fx_graph.call_function(target, args, kwargs)
+
+        output_name = node.output().debugName()
+        self.name_to_node[output_name] = fx_node
+        print(self.name_to_node)
+
     def convert_node(self, node: torch._C.Node):
         node_kind = node.kind()
         if node_kind == "prim::CreateObject":
@@ -361,7 +375,8 @@ class TS2EPConverter:
         elif node_kind.startswith("aten::"):
             self.convert_aten_op(node)
         else:
-            raise ValueError(f"Unsupported node kind: {node_kind}")
+            # For all other cases, we assume they are all custom ops.
+            self.convert_custom_op(node)
 
     def convert_graph_outputs(self):
         args = []

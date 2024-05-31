@@ -132,7 +132,7 @@ class TS2EPConverter:
 
         return ep
 
-    def convert_graph_inputs(self) -> List[str]:
+    def convert_graph_inputs(self):
         for graph_input in self.ts_graph.inputs():
             name = graph_input.debugName()
             normalized_name = normalize_name(name)
@@ -225,7 +225,7 @@ class TS2EPConverter:
             f"{root_attr_name}.{attr_name}" if root_attr_name else attr_name
         )
 
-    def convert_aten_op(self, node: torch._C.Node):
+    def convert_call_function_op(self, node: torch._C.Node):
         target = get_op_overload(node)
 
         if target is torch.ops.aten.size.int:
@@ -342,17 +342,7 @@ class TS2EPConverter:
                     self.name_to_node[output_name] = fx_node
                     return
 
-        self.convert_aten_op(node)
-
-    def convert_custom_op(self, node: torch._C.Node):
-        target = get_op_overload(node)
-
-        args, kwargs = self.get_args_kwargs(node, target._schema)
-
-        fx_node = self.fx_graph.call_function(target, args, kwargs)
-
-        output_name = node.output().debugName()
-        self.name_to_node[output_name] = fx_node
+        self.convert_call_function_op(node)
 
     def convert_node(self, node: torch._C.Node):
         node_kind = node.kind()
@@ -375,11 +365,9 @@ class TS2EPConverter:
             self.convert_aten__convolution(node)
         elif node_kind == "aten::div":
             self.convert_aten_div(node)
-        elif node_kind.startswith("aten::"):
-            self.convert_aten_op(node)
         else:
-            # For all other cases, we assume they are all custom ops.
-            self.convert_custom_op(node)
+            # For all other cases, we assume they are either aten:: ops or custom ops.
+            self.convert_call_function_op(node)
 
     def convert_graph_outputs(self):
         args = []

@@ -255,23 +255,27 @@ def value_to_cpp(value, cpp_type):
         return f"static_cast<{cpp_type}>({repr(value)})"
 
 
+LocalBufferPair = namedtuple("LocalBufferPair", ["global_buf", "local_buf"])
+
+
 class LocalizeBufferHandler(V.WrapperHandler):  # type: ignore[name-defined]
     def __init__(
         self,
         inner,
-        global_buf=None,
-        local_buf=None,
+        local_buf_pairs: List[LocalBufferPair],
         localize_fn: Optional[
             Callable[["LocalizeBufferHandler", str, sympy.Expr], Any]
         ] = None,
     ):
         super().__init__(inner)
-        self.global_buf = global_buf
-        self.local_buf = local_buf
+        self.local_buf_pairs = local_buf_pairs
         self.localize_fn = localize_fn
 
     def localize(self, name: str, index: sympy.Expr):
-        if self.global_buf and name == self.global_buf.get_name():
+        if self.local_buf_pair and name in [
+            loca_buf_pair.global_buf.get_name()
+            for loca_buf_pair in self.local_buf_pairs
+        ]:
             assert self.localize_fn is not None
             name, index = self.localize_fn(self, name, index)
         return name, index
@@ -283,8 +287,12 @@ class LocalizeBufferHandler(V.WrapperHandler):  # type: ignore[name-defined]
         local_buffer_name, local_buffer_index = self.localize(name, index)
         res = self._inner.store(local_buffer_name, local_buffer_index, value, mode)
         if (
-            self.global_buf
-            and name == self.global_buf.get_name()
+            self.local_buf_pairs
+            and name
+            in [
+                loca_buf_pair.global_buf.get_name()
+                for loca_buf_pair in self.local_buf_pairs
+            ]
             and isinstance(V.kernel, Kernel)
         ):
             # Remove name of local buffer from Kernel.store_buffer_names
@@ -408,7 +416,14 @@ class LocalBufferScope:
         def inner_fn_wrapper(inner_fn):
             def inner(index):
                 def localize_fn(self, name, index):
-                    name = self.local_buf.get_name()
+                    local_buf = None
+                    for loca_buf_pair in self.local_buf_pairs:
+                        if name == loca_buf_pair.global_buf.get_name():
+                            local_buf = loca_buf_pair.local_buf
+                            break
+                    assert local_buf is not None
+                    name = local_buf.get_name()
+
                     index_vars = sorted(
                         [
                             s
@@ -417,14 +432,15 @@ class LocalBufferScope:
                         ],
                         key=str,
                     )
-                    index = self.local_buf.layout.make_indexer()(index_vars)
+                    index = local_buf.layout.make_indexer()(index_vars)
                     return name, index
 
                 with V.set_ops_handler(
                     LocalizeBufferHandler(
                         V.get_ops_handler(),
-                        global_buf,
-                        local_buf,
+                        [
+                            LocalBufferPair(global_buf=global_buf, local_buf=local_buf),
+                        ],
                         localize_fn=localize_fn,
                     )
                 ):

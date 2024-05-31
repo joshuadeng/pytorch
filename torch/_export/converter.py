@@ -70,6 +70,9 @@ class TS2EPConverter:
 
         self.param_names: Set[str] = {name for name, _ in ts_model.named_parameters()}
         self.buffer_names: Set[str] = {name for name, _ in ts_model.named_buffers()}
+        self.attr_dict: Dict[str, Any] = {}
+        for name, param in (*ts_model.named_parameters(), *ts_model.named_buffers()):
+            self.attr_dict[normalize_name(name)] = param
 
         self.fx_graph: torch.fx.Graph = torch.fx.Graph()
         self.input_specs: List[InputSpec] = []
@@ -118,26 +121,21 @@ class TS2EPConverter:
 
         self.convert_graph_outputs()
 
-        gm = torch.fx.GraphModule({}, self.fx_graph)
+        # Build graph module with reference to attributes.
+        gm = torch.fx.GraphModule(self.attr_dict, self.fx_graph)
 
         inplace_optimize_sym_size_div(gm)
 
         gm.graph.lint()
 
         ep = self.retrace_as_exported_program(gm)
+
         return ep
 
-    def convert_graph_inputs(self):
+    def convert_graph_inputs(self) -> List[str]:
         for graph_input in self.ts_graph.inputs():
             name = graph_input.debugName()
             normalized_name = normalize_name(name)
-
-            fx_node = self.fx_graph.placeholder(normalized_name)
-
-            # fx_node.meta["val"] = FakeTensor()
-            # TODO: set fx_node.meta["val"]
-
-            self.name_to_node[name] = fx_node
 
             if name in self.param_names:
                 self.input_specs.append(
@@ -147,6 +145,7 @@ class TS2EPConverter:
                         target=name,
                     )
                 )
+                fx_node = self.fx_graph.get_attr(qualified_name=normalized_name)
             elif name in self.buffer_names:
                 self.input_specs.append(
                     InputSpec(
@@ -156,6 +155,7 @@ class TS2EPConverter:
                         persistent=True,
                     )
                 )
+                fx_node = self.fx_graph.get_attr(qualified_name=normalized_name)
             else:
                 self.input_specs.append(
                     InputSpec(
@@ -164,6 +164,12 @@ class TS2EPConverter:
                         target=name,
                     )
                 )
+                fx_node = self.fx_graph.placeholder(normalized_name)
+
+            self.name_to_node[name] = fx_node
+
+            # fx_node.meta["val"] = FakeTensor()
+            # TODO: set fx_node.meta["val"]
 
     def convert_prim_Constant(self, node: torch._C.Node):
         name = node.output().debugName()
@@ -342,14 +348,11 @@ class TS2EPConverter:
         target = get_op_overload(node)
 
         args, kwargs = self.get_args_kwargs(node, target._schema)
-        print(target, args, kwargs)
-        print(target._schema)
 
         fx_node = self.fx_graph.call_function(target, args, kwargs)
 
         output_name = node.output().debugName()
         self.name_to_node[output_name] = fx_node
-        print(self.name_to_node)
 
     def convert_node(self, node: torch._C.Node):
         node_kind = node.kind()
@@ -401,7 +404,7 @@ class TS2EPConverter:
 
     def retrace_as_exported_program(self, gm: torch.fx.GraphModule):
         # TODO: adjust input orders to match GraphSignature convention
-        inputs = [*self.sample_args, *self.params, *self.tensor_constants.values()]
+        inputs = [*self.sample_args]
 
         ep = torch.export._trace._export(
             gm,
